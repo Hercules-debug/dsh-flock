@@ -1,0 +1,195 @@
+/**
+ * The DSH-subagent backend for the agent turn.
+ *
+ * This is what makes the port real. The standalone version called a bare
+ * `/chat/completions` endpoint, so an agent had **no tools** and could only
+ * narrate work it never performed — it would log "wrote environment/foo.md"
+ * while `environment/` stayed empty. Artifacts were paper.
+ *
+ * Here each turn is dispatched through `ctx.subagents.startContinuable()`,
+ * producing a genuine DSH child agent with the host's full tool set (bash, fs,
+ * str_replace_editor, …), its own session, and its own system prompt. The
+ * agent writes and can actually *execute and verify* its artifact.
+ *
+ * Coordination is deliberately NOT done through `send_message`. That channel
+ * is restricted to the direct parent/child chain (`kind: "ancestor"`), which
+ * cannot express "read my ring neighbours". Agents coordinate the way the AWS
+ * original does: through the shared append-only log on disk, which every agent
+ * can read regardless of the delegation topology.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+/**
+ * Build a runner bound to one plugin context.
+ *
+ * @param {object} deps
+ * @param {object} deps.ctx            plugin context (needs `ctx.subagents`)
+ * @param {object} deps.captain        the Agent authorizing delegation
+ * @param {string} deps.provider       subagent provider name (default "spawn")
+ * @param {object} deps.agentOptions   provider/model/reasoningEffort overrides
+ * @returns {(args) => Promise<string>} a runner for `runAgent`
+ */
+export function createSubagentRunner({
+  ctx,
+  captain,
+  provider = "spawn",
+  agentOptions = {},
+  onEvent = () => {},
+  /** How long to wait when the host exposes no readable child state. */
+  settleGraceMs = 5000,
+}) {
+  const providerHandle = ctx.subagents.getProvider(provider);
+  if (!providerHandle) {
+    const available = ctx.subagents.list().join(", ") || "(none)";
+    throw new Error(
+      `flock: subagent provider "${provider}" is not registered. Available: ${available}`,
+    );
+  }
+  const caps = providerHandle.capabilities ?? {};
+  if (caps.persona === false) {
+    throw new Error(`flock: provider "${provider}" cannot apply a persona, which agents need`);
+  }
+
+  return async function subagentRunner({ prompt, agentIndex, clusterId, iteration }) {
+    const label = `flock:${clusterId}:agent-${agentIndex}:it-${iteration}`;
+    const start = await ctx.subagents.startContinuable({
+      provider,
+      label,
+      request: {
+        // A standalone prompt: a spawned child sees none of this conversation.
+        prompt: [{ type: "text", text: prompt }],
+        parent: captain,
+        persona: personaFor(clusterId, agentIndex),
+        ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
+      },
+    });
+
+    // The child is a full agent; its turn runs to completion in the host. We
+    // wait for it to settle, then read back what it wrote — the log is
+    // authoritative, exactly as in the AWS original where the harness reads the
+    // agent's append-only log rather than trusting a return value.
+    await waitForSettle(ctx, start.childId, { onEvent, graceMs: settleGraceMs });
+    return { settled: true, childId: start.childId };
+  };
+}
+
+/**
+ * Persona text: the only place the agent learns it is one member of a cluster
+ * rather than a solo assistant. Kept short — the loop instructions travel in
+ * the task prompt so they can change per iteration.
+ */
+export function personaFor(clusterId, agentIndex) {
+  return [
+    `You are agent-${agentIndex} in self-organizing cluster "${clusterId}".`,
+    `There is no orchestrator: nobody assigns you work and nobody tells you when the cluster is done.`,
+    `You coordinate with peers only by reading and appending to a shared log on disk.`,
+    `Do the single highest-value piece of work you can see, write it to disk, and append one log line.`,
+  ].join(" ");
+}
+
+/**
+ * Wait for a dispatched turn to stop working.
+ *
+ * The subagent service reports idle/running edges; we poll rather than block on
+ * a channel the child owns. Two robustness rules, both learned from failures:
+ *
+ *   - the listing APIs return ARRAYS (and `listDescendants` may need a root id),
+ *     so a single entry must be searched for, not assumed;
+ *   - if listing is unavailable or unhelpful, give the child a bounded grace
+ *     period and carry on. Blocking forever would deadlock the whole cluster,
+ *     and an unreadable state is not a reason to fail the turn.
+ */
+async function waitForSettle(ctx, childId, { onEvent, pollMs = 400, graceMs = 5000, timeoutMs = 15 * 60 * 1000 }) {
+  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  let sawRunning = false;
+
+  while (Date.now() < deadline) {
+    let state;
+    try {
+      state = await readChildState(ctx, childId);
+    } catch {
+      state = undefined; // unsupported listing: fall through to the grace period
+    }
+
+    if (state === "running" || state === "working") sawRunning = true;
+    if (sawRunning && isSettled(state)) return;
+    // Never observed it running and it reports settled: the turn finished
+    // faster than our first poll.
+    if (!sawRunning && isSettled(state)) return;
+
+    // No usable state at all: wait out the grace period once, then return so
+    // the caller can inspect the disk for what the agent actually produced.
+    if (state === undefined && Date.now() - started >= graceMs) {
+      onEvent({ type: "settle-unknown", childId });
+      return;
+    }
+    await sleep(pollMs);
+  }
+  onEvent({ type: "settle-timeout", childId });
+}
+
+const isSettled = (state) =>
+  state === "idle" || state === "ready" || state === "settled" || state === "completed" || state === "done";
+
+/** Find this child's state across whichever listing API the host exposes. */
+async function readChildState(ctx, childId) {
+  const norm = (entry) => entry?.state ?? entry?.status ?? entry?.activity;
+  const pick = (arr) => {
+    if (!Array.isArray(arr)) return norm(arr);
+    const hit = arr.find((e) => e?.sessionId === childId || e?.childId === childId || e?.id === childId);
+    return norm(hit ?? arr[0]);
+  };
+
+  if (typeof ctx.subagents.listChildren === "function") {
+    const v = pick(await ctx.subagents.listChildren(childId));
+    if (v !== undefined) return v;
+  }
+  if (typeof ctx.subagents.listDescendants === "function") {
+    // Some hosts require a root session id; the parent agent carries it.
+    const root = ctx.__flockRootId;
+    const v = pick(await ctx.subagents.listDescendants(root));
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A runner that dispatches to a caller-supplied function instead of a real
+ * subagent. Used by the test suite, which cannot stand up the host runtime.
+ */
+export function createInjectedRunner(fn) {
+  return async (args) => fn(args);
+}
+
+/**
+ * Read the artifact an agent actually wrote, for hosts that want to record the
+ * filename in the coordination log. Returns null when the agent wrote nothing
+ * this turn — which is now a meaningful signal, because the agent has tools and
+ * could have written something.
+ */
+export function newestArtifact(envDir, sinceMs) {
+  let best = null;
+  let entries;
+  try {
+    entries = fs.readdirSync(envDir);
+  } catch {
+    return null;
+  }
+  for (const name of entries) {
+    const full = path.join(envDir, name);
+    let st;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    if (sinceMs !== undefined && st.mtimeMs < sinceMs) continue;
+    if (!best || st.mtimeMs > best.mtimeMs) best = { name, mtimeMs: st.mtimeMs, bytes: st.size };
+  }
+  return best;
+}

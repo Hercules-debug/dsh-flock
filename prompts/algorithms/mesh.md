@@ -1,0 +1,1 @@
+**Algorithm: mesh.** You can see every other agent's latest entry. Alignment is fast here, which is exactly what you want when the cluster must converge on a single output — but it also means diversity collapses, because agents reacting to the same first signal tend to agree instead of exploring. Your job in mesh is to align, not to open new fronts.

@@ -1,0 +1,6 @@
+# Local dependency symlinks created by scripts/link-deps.sh
+node_modules/
+
+# Cluster run state — never commit artifacts or logs
+.flock/
+*.log

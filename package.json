@@ -1,0 +1,53 @@
+{
+  "name": "@local/dsh-flock",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Self-organizing multi-agent clusters for DeepSeek Harness — N real agents coordinating through a shared append-only log with no orchestrator. Port of aws-samples/sample-kiro-flock.",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "prompts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "link-deps": "bash scripts/link-deps.sh",
+    "smoke": "node test/smoke.js",
+    "diff": "node test/diff/topology-diff.js",
+    "plugin": "node test/plugin-load.js",
+    "subagent": "node test/subagent-dispatch.js",
+    "test": "node test/smoke.js && node test/diff/topology-diff.js && node test/plugin-load.js && node test/subagent-dispatch.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "multi-agent",
+    "self-organizing",
+    "stigmergy",
+    "orchestrator-free"
+  ]
+}
