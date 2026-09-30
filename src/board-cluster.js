@@ -14,10 +14,7 @@ import { runBoardAgent, boardSnapshot } from "./board-agent.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const BOARD_PROMPT_DIR = path.resolve(__dirname, "..", "prompts");
 
-export const BOARD_DEFAULT_CONFIG = {
-  /** Soft hint only; the runtime deadline is the real backstop. */
-  maxTurnsPerAgent: 0,
-};
+export const BOARD_DEFAULT_CONFIG = {};
 
 /** Hard ceiling, same reasoning as the cluster mode. */
 export const MAX_BOARD_AGENTS = 10;
@@ -47,7 +44,6 @@ export async function startBoard({
   signal,
   onEvent = () => {},
   promptDir = BOARD_PROMPT_DIR,
-  maxTurns = 0,
 }) {
   const cfg = { ...BOARD_DEFAULT_CONFIG, ...config };
   const paths = boardPaths(root, boardId);
@@ -68,9 +64,10 @@ export async function startBoard({
   writeState(paths, "running", "operator");
   onEvent({ type: "start", boardId, concurrency });
 
-  // Every agent starts at once. There is no reason to stagger: they do not
-  // race for a shared cursor, and the board tolerates concurrent appends by
-  // construction.
+  // Every agent is dispatched exactly once. There is no round structure: an
+  // agent decides for itself when to look at the board and when it is done,
+  // and the harness never restarts it. The board tolerates concurrent appends
+  // by construction, so there is nothing to stagger for either.
   const tasks = [];
   for (let n = 0; n < concurrency; n++) {
     tasks.push(
@@ -81,7 +78,6 @@ export async function startBoard({
         promptDir,
         signal,
         onEvent,
-        maxTurns: maxTurns || cfg.maxTurnsPerAgent,
       }),
     );
   }

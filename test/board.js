@@ -238,9 +238,14 @@ t("no shell variable is promised that the host never sets", () => {
   assert.ok(!text.includes("{{"), "no placeholder may survive");
 });
 
-t("the prompt tells the agent it is responsible for deciding when to stop", () => {
+t("the prompt tells the agent it will NOT be called again, and that stopping is its call", () => {
   const text = loadBoardInstructions(PROMPTS);
-  assert.match(text, /不会自动停止|no external (judge|stopping)/i);
+  assert.match(text, /不会.*再把你叫起来|不会.*自动/, "must say the harness will not restart it");
+  assert.match(text, /由你判断|你的决定/, "must place the stopping decision on the agent");
+  assert.ok(
+    !/回第 1 步/.test(text),
+    "must not tell the agent to loop — a single dispatch is the whole turn",
+  );
 });
 
 console.log("\nboard cluster");
@@ -269,7 +274,7 @@ await ta("agents write to one shared board and can see each other's entries", as
   await startBoard({
     root, boardId: "shared", concurrency: 3,
     direction: "x", runner, signal: ac.signal,
-    promptDir: PROMPTS, maxTurns: 1,
+    promptDir: PROMPTS,
   });
   const snap = boardSnapshot(root, "shared");
   assert.equal(snap.entryCount, 3, "all three agents must have appended");
@@ -285,26 +290,34 @@ await ta("an agent that writes nothing is reported as silent", async () => {
   await startBoard({
     root, boardId: "quiet", concurrency: 1, direction: "x",
     runner: async () => {},  // does nothing at all
-    signal: ac.signal, promptDir: PROMPTS, maxTurns: 1,
+    signal: ac.signal, promptDir: PROMPTS,
     onEvent: (e) => events.push(e),
   });
   assert.ok(events.some((e) => e.type === "silent"), "silence must be surfaced, not hidden");
   assert.equal(boardSnapshot(root, "quiet").entryCount, 0);
 });
 
-await ta("a `done` entry ends that agent", async () => {
+await ta("each agent is dispatched EXACTLY once — no round structure", async () => {
+  // The point of this mode is that the agent decides when to stop, not the
+  // harness restarting it. An earlier version looped after every turn, which
+  // is a round structure the agent cannot refuse.
   const root = tmp();
   const ac = new AbortController();
-  let calls = 0;
+  const dispatches = new Map();
   const runner = async ({ agentIndex, paths }) => {
-    calls++;
-    appendEntries(paths, [{ author: `agent-${agentIndex}`, topic: "done", body: "finished" }]);
+    dispatches.set(agentIndex, (dispatches.get(agentIndex) ?? 0) + 1);
+    // Deliberately do NOT write `done`: a looping harness would re-dispatch.
+    appendEntries(paths, [{ author: `agent-${agentIndex}`, topic: "work", body: "did a thing" }]);
   };
-  const res = await startBoard({
-    root, boardId: "done", concurrency: 2, direction: "x",
+  await startBoard({
+    root, boardId: "once", concurrency: 3, direction: "x",
     runner, signal: ac.signal, promptDir: PROMPTS,
   });
-  assert.equal(calls, 2, "each agent should stop after writing `done`");
+  assert.equal(dispatches.size, 3, "all three agents ran");
+  for (const [n, count] of dispatches) {
+    assert.equal(count, 1, `agent-${n} was dispatched ${count} times; must be exactly 1`);
+  }
+  assert.equal(boardSnapshot(root, "once").entryCount, 3);
 });
 
 await ta("a runner that throws is surfaced and does not kill the board", async () => {
@@ -314,7 +327,7 @@ await ta("a runner that throws is surfaced and does not kill the board", async (
   await startBoard({
     root, boardId: "boom", concurrency: 2, direction: "x",
     runner: async () => { throw new Error("provider unavailable"); },
-    signal: ac.signal, promptDir: PROMPTS, maxTurns: 1,
+    signal: ac.signal, promptDir: PROMPTS,
     onEvent: (e) => events.push(e),
   });
   const errs = events.filter((e) => e.type === "error");

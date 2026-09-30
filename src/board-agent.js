@@ -103,70 +103,62 @@ export async function runBoardAgent({
   promptDir,
   signal,
   onEvent = () => {},
-  maxTurns = 0,
 }) {
   const paths = boardPaths(root, boardId);
   const instructions = loadBoardInstructions(promptDir, { n, paths });
-  let turn = 0;
 
+  // Wait for the operator to release the board before doing anything.
   while (!signal.aborted) {
-    if (maxTurns > 0 && turn >= maxTurns) {
-      onEvent({ type: "exit", n, reason: "max-turns" });
-      return { n, turns: turn, reason: "max-turns" };
-    }
-
     const state = readState(paths);
     if (state.state === "stopped" || state.state === "stopping") {
       onEvent({ type: "exit", n, reason: state.state });
-      return { n, turns: turn, reason: state.state };
+      return { n, turns: 0, reason: state.state };
     }
     if (state.state === "paused") {
       await sleep(PAUSE_POLL_INTERVAL_MS, signal);
       continue;
     }
+    break;
+  }
+  if (signal.aborted) return { n, turns: 0, reason: "aborted" };
 
-    const direction = (() => {
-      try { return fs.readFileSync(paths.direction, "utf8"); } catch { return ""; }
-    })();
+  const direction = (() => {
+    try { return fs.readFileSync(paths.direction, "utf8"); } catch { return ""; }
+  })();
 
-    const before = readEntries(paths).length;
-    const prompt = buildBoardPrompt({ n, boardId, paths, direction, instructions, turn });
+  const before = readEntries(paths).length;
+  const prompt = buildBoardPrompt({ n, boardId, paths, direction, instructions, turn: 0 });
 
-    let dispatchError = null;
-    try {
-      await runner({ prompt, turn, agentIndex: n, boardId, paths, signal });
-    } catch (err) {
-      dispatchError = String(err?.message ?? err);
-      onEvent({ type: "error", n, turn, error: dispatchError });
-    }
-
-    // What the agent actually did is on disk. Never infer it from a return value.
-    const after = readEntries(paths);
-    const fresh = after.slice(before);
-    const wrote = fresh.length;
-
-    if (wrote > 0) {
-      for (const e of fresh) onEvent({ type: "entry", n, turn, entry: e });
-    } else {
-      onEvent({ type: "silent", n, turn, error: dispatchError });
-    }
-
-    // An agent that declares `done` is finished.
-    //
-    // Look at THIS agent's own entries, not the board tail: with concurrent
-    // agents the last line on the board usually belongs to somebody else, so
-    // keying off the tail failed whenever another agent wrote after us.
-    if (fresh.some((e) => String(e.author) === `agent-${n}` && e.topic === "done")) {
-      onEvent({ type: "done", n, turn });
-      return { n, turns: turn + 1, reason: "done" };
-    }
-
-    turn += 1;
-    if (signal.aborted) break;
-    await sleep(0, signal);
+  let dispatchError = null;
+  try {
+    await runner({ prompt, turn: 0, agentIndex: n, boardId, paths, signal });
+  } catch (err) {
+    dispatchError = String(err?.message ?? err);
+    onEvent({ type: "error", n, turn: 0, error: dispatchError });
   }
 
-  return { n, turns: turn, reason: "aborted" };
+  // Read back what actually happened. Never infer it from a return value.
+  const fresh = readEntries(paths).slice(before);
+  if (fresh.length > 0) {
+    for (const e of fresh) onEvent({ type: "entry", n, turn: 0, entry: e });
+  } else {
+    onEvent({ type: "silent", n, turn: 0, error: dispatchError });
+  }
+
+  // ONE dispatch per agent, then stop.
+  //
+  // An earlier version looped: whenever an agent finished without writing
+  // `done`, the harness immediately dispatched it again. That is a round
+  // structure the agent cannot refuse — the opposite of the point of this
+  // mode, where an agent decides for itself when to look at the board.
+  //
+  // A single dispatch does not limit the agent: inside one turn it can read
+  // and write the board as many times as it likes. What it means is that
+  // WHEN to stop is the agent's decision, not the harness restarting it
+  // forever. `done` is now just an ordinary topic label, not an exit code.
+  const reason = fresh.length > 0 ? "contributed" : "silent";
+  onEvent({ type: "finished", n, reason });
+  return { n, turns: 1, reason };
 }
 
 /** Snapshot for rendering. */
