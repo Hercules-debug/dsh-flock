@@ -156,7 +156,7 @@ npm test
 | `test/smoke.js` — 19 | coordination invariants: neighbour selection, convergence, termination, carry-over, concurrency limiting, that a passive agent is **not** credited with progress |
 | `test/diff/topology-diff.js` | the port equals the AWS source: 1272 input combinations executed against the verbatim-extracted upstream functions |
 | `test/plugin-load.js` — 10 | `apply()` works against the **real** `dsh-tools`: tools register, the schema compiles to valid JSON Schema, guards fire |
-| `test/subagent-dispatch.js` — 9 | the dispatch call conforms to the documented `startContinuable` spec shape, personas are applied, settle/grace behaviour is bounded |
+| `test/subagent-dispatch.js` — 11 | the dispatch call conforms to the documented `startContinuable` spec shape, personas are applied, settle/grace behaviour is bounded, and a finished child (`activity: "inactive"`) is recognized rather than waited out |
 
 ### The differential test
 
@@ -175,6 +175,30 @@ meaningful. The guard lives in `clampRadius`, used by `selectNeighbours` — the
 only sanctioned entry point — so the buggy range is unreachable. If upstream
 fixes it, the diff run flags the divergence and this port can follow.
 
+## Live verification
+
+`npm run live [agents] [algorithm]` boots the composed profile through the real
+host runtime, mints a root captain, dispatches a cluster, and asserts that
+artifacts land on disk. It is the only test that exercises a genuine agent turn.
+
+Confirmed against a live profile (3 agents, mesh): **11 artifacts, 36KB**, with
+agents running real code — one artifact reproduces a read-modify-write race on
+the shared log and reports it verified at 3 and 12 concurrent agents. That is
+the difference tools make: the same prompt on a tool-less runner produced only
+narration.
+
+It found three defects that the mocked suites could not, all now fixed and
+pinned by regression tests:
+
+| Defect | Symptom |
+|---|---|
+| `spec.signal` not passed | `signal.throwIfAborted()` TypeError — **every dispatch failed**, the cluster exited instantly with zero output |
+| no model route on the child | child created but `activity: "inactive"` forever — it never activated |
+| `isSettled` did not know `"inactive"` | a finished child never settled, so every dispatch waited out the full timeout and the cluster hung |
+
+Requires a profile with a working model route; set `FLOCK_AGENT_PROVIDER` /
+`FLOCK_AGENT_MODEL` to point the agents at one.
+
 ## What is verified and what is not
 
 Being precise about this, because the distinction matters:
@@ -182,11 +206,9 @@ Being precise about this, because the distinction matters:
 - **Verified here:** the coordination machinery, the plugin's registration
   against real `dsh-tools`, the dispatch call's conformance to the documented
   subagent API, and byte-for-byte agreement with the AWS topology code.
-- **Not verified here:** that a *live* DSH agent turn produces a useful artifact.
-  Installing the plugin into a profile requires write access to `~/.dsh/profiles`,
-  which this development sandbox denies. The dispatch tests use a mock host that
-  enforces the documented spec shape — they prove the call is well-formed, not
-  that a real child agent does good work.
+- **Verified live:** the plugin installs into a profile, mounts, registers its
+  three tools in the live registry, and a dispatched cluster writes real
+  artifacts to disk (see above).
 - **Not verifiable at all:** behavioural equivalence with the AWS original. It
   needs EC2 and a Kiro subscription, so there is no way to run both and compare.
 

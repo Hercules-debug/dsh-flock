@@ -26,7 +26,8 @@
     "diff": "node test/diff/topology-diff.js",
     "plugin": "node test/plugin-load.js",
     "subagent": "node test/subagent-dispatch.js",
-    "test": "node test/smoke.js && node test/diff/topology-diff.js && node test/plugin-load.js && node test/subagent-dispatch.js"
+    "test": "node test/smoke.js && node test/diff/topology-diff.js && node test/plugin-load.js && node test/subagent-dispatch.js",
+    "live": "node test/live-cluster.mjs"
   },
   "dsh": {
     "bundle": {

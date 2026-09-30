@@ -227,7 +227,7 @@ export async function runAgent({
     const logLinesBefore = countLogLines(paths, n);
     let dispatchError = null;
     try {
-      await runner({ prompt, iteration, agentIndex: n, clusterId, paths });
+      await runner({ prompt, iteration, agentIndex: n, clusterId, paths, signal });
     } catch (err) {
       dispatchError = String(err?.message ?? err);
       onEvent({ type: "error", n, iteration, error: dispatchError, err });

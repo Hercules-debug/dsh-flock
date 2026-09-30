@@ -51,25 +51,38 @@ export function createSubagentRunner({
     throw new Error(`flock: provider "${provider}" cannot apply a persona, which agents need`);
   }
 
-  return async function subagentRunner({ prompt, agentIndex, clusterId, iteration }) {
+  return async function subagentRunner({ prompt, agentIndex, clusterId, iteration, signal }) {
     const label = `flock:${clusterId}:agent-${agentIndex}:it-${iteration}`;
+    // `spec.signal` is REQUIRED — the service calls `signal.throwIfAborted()`
+    // on it before doing anything else. Omitting it throws a TypeError that
+    // looks nothing like a missing parameter, and every agent turn dies before
+    // the child is even created.
+    const ac = new AbortController();
+    const onAbort = () => ac.abort();
+    signal?.addEventListener?.("abort", onAbort, { once: true });
     const start = await ctx.subagents.startContinuable({
       provider,
       label,
+      signal: ac.signal,
       request: {
         // A standalone prompt: a spawned child sees none of this conversation.
         prompt: [{ type: "text", text: prompt }],
         parent: captain,
         persona: personaFor(clusterId, agentIndex),
+        signal: ac.signal,
         ...(Object.keys(agentOptions).length > 0 ? { agentOptions } : {}),
       },
-    });
+    }).finally(() => signal?.removeEventListener?.("abort", onAbort));
 
     // The child is a full agent; its turn runs to completion in the host. We
     // wait for it to settle, then read back what it wrote — the log is
     // authoritative, exactly as in the AWS original where the harness reads the
     // agent's append-only log rather than trusting a return value.
-    await waitForSettle(ctx, start.childId, { onEvent, graceMs: settleGraceMs });
+    await waitForSettle(ctx, start.childId, {
+      onEvent,
+      startupGraceMs: settleGraceMs,
+      parentSessionId: captain.session?.id,
+    });
     return { settled: true, childId: start.childId };
   };
 }
@@ -100,57 +113,95 @@ export function personaFor(clusterId, agentIndex) {
  *     period and carry on. Blocking forever would deadlock the whole cluster,
  *     and an unreadable state is not a reason to fail the turn.
  */
-async function waitForSettle(ctx, childId, { onEvent, pollMs = 400, graceMs = 5000, timeoutMs = 15 * 60 * 1000 }) {
+async function waitForSettle(ctx, childId, { onEvent, pollMs = 400, startupGraceMs = 3000, timeoutMs = 15 * 60 * 1000, parentSessionId }) {
   const deadline = Date.now() + timeoutMs;
   const started = Date.now();
   let sawRunning = false;
+  let lastState;
 
   while (Date.now() < deadline) {
     let state;
     try {
-      state = await readChildState(ctx, childId);
+      state = await readChildState(ctx, childId, parentSessionId);
     } catch {
-      state = undefined; // unsupported listing: fall through to the grace period
+      state = undefined;
     }
+    lastState = state;
 
     if (state === "running" || state === "working") sawRunning = true;
-    if (sawRunning && isSettled(state)) return;
-    // Never observed it running and it reports settled: the turn finished
-    // faster than our first poll.
-    if (!sawRunning && isSettled(state)) return;
+    // Only trust a settled reading once the child has actually been seen
+    // running, or once a startup grace has elapsed. A child that has not
+    // started yet also reads as "idle", and returning on that reading is what
+    // made a live cluster finish instantly having produced nothing.
+    if (isSettled(state) && (sawRunning || Date.now() - started >= startupGraceMs)) return;
 
-    // No usable state at all: wait out the grace period once, then return so
-    // the caller can inspect the disk for what the agent actually produced.
-    if (state === undefined && Date.now() - started >= graceMs) {
-      onEvent({ type: "settle-unknown", childId });
+    // Unknown state: give it the same grace, then stop waiting. The caller
+    // inspects the disk for what actually appeared.
+    if (state === undefined && Date.now() - started >= startupGraceMs) {
+      onEvent({ type: "settle-unknown", childId, lastState });
       return;
     }
     await sleep(pollMs);
   }
-  onEvent({ type: "settle-timeout", childId });
+  onEvent({ type: "settle-timeout", childId, lastState });
 }
 
-const isSettled = (state) =>
-  state === "idle" || state === "ready" || state === "settled" || state === "completed" || state === "done";
+/**
+ * Does this activity mean the child is no longer working?
+ *
+ * The live host reports `activity: "running" | "inactive"`. An earlier version
+ * of this list omitted "inactive" and only knew "idle", so a finished child
+ * never registered as settled and every dispatch waited out the full 15-minute
+ * timeout — a cluster that hung with two agents done and a third never started.
+ * Match the real vocabulary, and treat anything that is not "running" as
+ * settled, so an unrecognised future value degrades to finished rather than
+ * hanging forever.
+ */
+const isSettled = (state) => {
+  if (state === undefined) return false;
+  const s = String(state).toLowerCase();
+  if (s === "running" || s === "working" || s === "active" || s === "starting") return false;
+  return true;
+};
 
-/** Find this child's state across whichever listing API the host exposes. */
-async function readChildState(ctx, childId) {
-  const norm = (entry) => entry?.state ?? entry?.status ?? entry?.activity;
-  const pick = (arr) => {
-    if (!Array.isArray(arr)) return norm(arr);
-    const hit = arr.find((e) => e?.sessionId === childId || e?.childId === childId || e?.id === childId);
-    return norm(hit ?? arr[0]);
+/**
+ * Find this child's activity across whichever listing API the host exposes.
+ *
+ * Two things learned the hard way against the live host:
+ *   - the listing is keyed by the PARENT session id, not the child's;
+ *   - the field is `activity` ("running" | "inactive"), not `state`/`status`.
+ * Getting either wrong yields `undefined` forever, which the caller then reads
+ * as "settled" — a cluster that finishes instantly having done nothing.
+ */
+async function readChildState(ctx, childId, parentSessionId) {
+  const norm = (entry) => {
+    if (!entry || typeof entry !== "object") return undefined;
+    return entry.activity ?? entry.state ?? entry.status;
+  };
+  const pick = (value) => {
+    if (value === undefined || value === null) return undefined;
+    if (!Array.isArray(value)) return norm(value);
+    if (value.length === 0) return undefined;
+    const hit = value.find((e) =>
+      e && (e.id === childId || e.sessionId === childId || e.childId === childId));
+    return norm(hit ?? value[0]);
   };
 
-  if (typeof ctx.subagents.listChildren === "function") {
-    const v = pick(await ctx.subagents.listChildren(childId));
-    if (v !== undefined) return v;
+  const parents = [parentSessionId, ctx.__flockRootId].filter(Boolean);
+  for (const parentId of parents) {
+    if (typeof ctx.subagents.listChildren !== "function") break;
+    try {
+      const v = pick(await ctx.subagents.listChildren(parentId));
+      if (v !== undefined) return v;
+    } catch { /* try the next source */ }
   }
   if (typeof ctx.subagents.listDescendants === "function") {
-    // Some hosts require a root session id; the parent agent carries it.
-    const root = ctx.__flockRootId;
-    const v = pick(await ctx.subagents.listDescendants(root));
-    if (v !== undefined) return v;
+    for (const parentId of parents) {
+      try {
+        const v = pick(await ctx.subagents.listDescendants(parentId));
+        if (v !== undefined) return v;
+      } catch { /* try the next source */ }
+    }
   }
   return undefined;
 }

@@ -121,6 +121,32 @@ await ta("waits for the child to go idle before returning", async () => {
   assert.equal(out.childId, "child-1");
 });
 
+await ta("a finished child ('inactive') is recognized as settled, not waited out", async () => {
+  // The live host reports activity: "running" | "inactive". An earlier isSettled
+  // only knew "idle", so a finished child never settled and every dispatch
+  // waited the full timeout — a cluster hung with two agents done and a third
+  // never started. This test pins the real vocabulary.
+  const ctx = mockHost({ childStates: ["running", "inactive"] });
+  const runner = createSubagentRunner({ ctx, captain: { id: "c" }, provider: "spawn", settleGraceMs: 50 });
+  const t0 = Date.now();
+  const out = await Promise.race([
+    runner({ prompt: "x", agentIndex: 0, clusterId: "c", iteration: 0 }).then(() => "returned"),
+    new Promise((r) => setTimeout(() => r("hung"), 4000)),
+  ]);
+  assert.equal(out, "returned", "'inactive' must count as settled");
+  assert.ok(Date.now() - t0 < 3000, "must not wait out the timeout");
+});
+
+await ta("an unrecognized future activity value degrades to settled, never hangs", async () => {
+  const ctx = mockHost({ childStates: ["running", "some-future-state"] });
+  const runner = createSubagentRunner({ ctx, captain: { id: "c" }, provider: "spawn", settleGraceMs: 50 });
+  const out = await Promise.race([
+    runner({ prompt: "x", agentIndex: 0, clusterId: "c", iteration: 0 }).then(() => "returned"),
+    new Promise((r) => setTimeout(() => r("hung"), 4000)),
+  ]);
+  assert.equal(out, "returned");
+});
+
 await ta("a host that cannot list children does not hang the cluster", async () => {
   // Older hosts may not expose listing; the runner must degrade, not deadlock.
   const ctx = mockHost();
