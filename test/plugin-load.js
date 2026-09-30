@@ -104,13 +104,22 @@ function mockCtx() {
   };
 }
 
-await ta("registers all three flock tools", async () => {
+await ta("registers the cluster and board tools", async () => {
   const ctx = mockCtx();
   mod.apply(ctx, new mod.Config({}));
-  assert.deepEqual(
-    [...ctx._tools.keys()].sort(),
-    ["flock_direct", "flock_run", "flock_status"],
-  );
+  assert.deepEqual([...ctx._tools.keys()].sort(), [
+    "board_direct", "board_run", "board_status",
+    "flock_direct", "flock_run", "flock_status",
+  ]);
+});
+
+await ta("board_run's description contrasts it with flock_run", async () => {
+  const ctx = mockCtx();
+  mod.apply(ctx, new mod.Config({}));
+  const d = ctx._tools.get("board_run").description;
+  assert.match(d, /blackboard|append-only/i);
+  assert.match(d, /flock_run/, "must say how it differs from the snapshot mode");
+  assert.match(d, /Do NOT|Not suited/i, "a pattern tool must document its bad-fit cases");
 });
 
 await ta("registers a system-prompt usage section", async () => {
