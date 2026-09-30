@@ -122,9 +122,7 @@ if (captain) {
         config: { algorithm: ALGORITHM, neighbourRadius: 1, swarmK: 2, autopause: true },
         runner,
         signal: ac.signal,
-        maxInflight: 2,
-        staggerMs: 800,
-      });
+        });
     } finally {
       clearTimeout(timer);
     }

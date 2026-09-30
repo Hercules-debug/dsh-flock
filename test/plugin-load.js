@@ -36,7 +36,42 @@ await ta("Config validates and applies defaults", async () => {
   assert.equal(cfg.root, ".flock");
   assert.equal(cfg.provider, "spawn");
   assert.equal(cfg.defaultAlgorithm, "amorphous");
-  assert.equal(cfg.maxInflight, 2);
+  assert.equal(cfg.maxAgents, 10);
+});
+
+console.log("\nroot resolution (the /.flock bug)");
+
+await ta("a relative root resolves against the SESSION workspace, not process.cwd()", async () => {
+  // Shipped bug: root was resolved with path.resolve(process.cwd(), ".flock").
+  // A web daemon is launched from "/", so every cluster path became /.flock/...
+  // and mkdir died with EACCES on a read-only root.
+  const { resolveRoot } = mod;
+  const agent = { session: { header: { cwd: "/Users/someone/project" } } };
+  assert.equal(resolveRoot({ root: ".flock" }, agent), "/Users/someone/project/.flock");
+});
+
+await ta("an absolute root is used verbatim", async () => {
+  const { resolveRoot } = mod;
+  assert.equal(resolveRoot({ root: "/tmp/pinned" }, null), "/tmp/pinned");
+  assert.equal(
+    resolveRoot({ root: "/tmp/pinned" }, { session: { header: { cwd: "/elsewhere" } } }),
+    "/tmp/pinned",
+    "an absolute root must not be re-anchored",
+  );
+});
+
+await ta("a session with no cwd is refused rather than silently mis-resolved", async () => {
+  const { resolveRoot } = mod;
+  assert.throws(() => resolveRoot({ root: ".flock" }, undefined), /no cwd/);
+  assert.throws(() => resolveRoot({ root: ".flock" }, { session: { header: {} } }), /no cwd/);
+});
+
+await ta("process.cwd() is never consulted for a relative root", async () => {
+  const { resolveRoot } = mod;
+  const before = process.cwd();
+  const got = resolveRoot({ root: ".flock" }, { session: { header: { cwd: "/tmp/ws" } } });
+  assert.equal(got, "/tmp/ws/.flock");
+  assert.notEqual(got, path.resolve(before, ".flock"), "must not fall back to the process cwd");
 });
 
 console.log("\napply() against a mock host context");
@@ -119,7 +154,10 @@ await ta("flock_direct rejects an unknown algorithm before touching disk", async
   mod.apply(ctx, new mod.Config({}));
   const direct = ctx._tools.get("flock_direct");
   await assert.rejects(
-    () => direct.execute({ cluster: "x", agents: 2, algorithm: "not-a-thing" }, { agent: {} }),
+    () => direct.execute(
+      { cluster: "x", agents: 2, algorithm: "not-a-thing" },
+      { agent: { session: { header: { cwd: "/tmp/ws" } } } },
+    ),
     /unknown algorithm/,
   );
 });
@@ -129,7 +167,10 @@ await ta("flock_direct rejects an unknown lifecycle state", async () => {
   mod.apply(ctx, new mod.Config({}));
   const direct = ctx._tools.get("flock_direct");
   await assert.rejects(
-    () => direct.execute({ cluster: "x", agents: 2, state: "explode" }, { agent: {} }),
+    () => direct.execute(
+      { cluster: "x", agents: 2, state: "explode" },
+      { agent: { session: { header: { cwd: "/tmp/ws" } } } },
+    ),
     /unknown state/,
   );
 });

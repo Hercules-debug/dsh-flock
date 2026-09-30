@@ -42,9 +42,6 @@ export async function startCluster({
   onEvent = () => {},
   promptDir = PROMPT_DIR,
   maxIterations = 0,
-  /** Max agent turns in flight. A real DSH agent is far heavier than an HTTP call. */
-  maxInflight = 2,
-  staggerMs = 500,
 }) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const paths = clusterPaths(root, clusterId, concurrency);
@@ -63,53 +60,62 @@ export async function startCluster({
     fs.renameSync(path.join(paths.env, f), path.join(history, `${stamp}__${f}`));
   }
 
-  const limitedRunner = withConcurrencyLimit(runner, maxInflight);
   onEvent({
     type: "start",
     clusterId,
     concurrency,
     algorithm: cfg.algorithm,
     radius: cfg.neighbourRadius,
-    maxInflight,
   });
 
+  // Every agent runs concurrently, immediately. Shared-state coordination gets
+  // its value from parallelism: agents read the same log at the same time and
+  // contribute different angles. Serializing them makes later agents read a log
+  // their peers have already filled, which pushes them toward agreement instead
+  // of exploration — it costs diversity, not just wall clock. Cluster size is
+  // the only concurrency control; see MAX_CLUSTER_AGENTS.
   const tasks = [];
   for (let n = 0; n < concurrency; n++) {
     tasks.push(
       runAgent({
         root, clusterId, n, concurrency,
         defaults: cfg,
-        runner: limitedRunner,
+        runner,
         promptDir,
         signal,
         onEvent,
         maxIterations,
       }),
     );
-    if (staggerMs > 0) await new Promise((r) => setTimeout(r, staggerMs));
   }
   const results = await Promise.allSettled(tasks);
   return { clusterId, results, paths };
 }
 
-/** Bound how many agents run at once — a real agent turn is expensive. */
-export function withConcurrencyLimit(fn, limit) {
-  if (!limit || limit <= 0) return fn;
-  let active = 0;
-  const queue = [];
-  const next = () => {
-    if (active >= limit || queue.length === 0) return;
-    active++;
-    const { args, resolve, reject } = queue.shift();
-    Promise.resolve().then(() => fn(args)).then(resolve, reject).finally(() => { active--; next(); });
-  };
-  return (args) => {
-    if (active < limit) {
-      active++;
-      return Promise.resolve().then(() => fn(args)).finally(() => { active--; next(); });
-    }
-    return new Promise((resolve, reject) => queue.push({ args, resolve, reject }));
-  };
+/**
+ * Hard ceiling on cluster size.
+ *
+ * Every agent is a full DSH session with its own model route, so an unbounded
+ * `agents` value is a way to melt a machine and a gateway at once. This is a
+ * refusal, not a queue: asking for more is a mistake worth surfacing, and
+ * silently running fewer agents than requested would misrepresent the cluster.
+ */
+export const MAX_CLUSTER_AGENTS = 10;
+
+/** Clamp/validate a requested cluster size. Throws when it exceeds the cap. */
+export function resolveClusterSize(requested) {
+  const n = Number(requested);
+  if (!Number.isFinite(n) || n < 1) {
+    throw new Error(`agents must be a positive number, got ${JSON.stringify(requested)}`);
+  }
+  const size = Math.floor(n);
+  if (size > MAX_CLUSTER_AGENTS) {
+    throw new Error(
+      `agents=${size} exceeds the maximum of ${MAX_CLUSTER_AGENTS}. ` +
+        `Each agent is a full DSH session, so clusters are capped.`,
+    );
+  }
+  return size;
 }
 
 export function snapshot(root, clusterId, concurrency) {

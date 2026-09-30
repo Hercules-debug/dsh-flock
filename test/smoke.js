@@ -14,7 +14,7 @@ import path from "node:path";
 import { amorphousNeighbours, meshNeighbours, convergenceEstimate, selectNeighbours, clampRadius } from "../src/neighbours.js";
 import { clusterPaths, tailLog, readState, writeConfig, writeDirection, writeState, readLog } from "../src/store.js";
 import { runAgent, isIdleAction, buildPrompt } from "../src/agent.js";
-import { startCluster, snapshot, withConcurrencyLimit } from "../src/cluster.js";
+import { startCluster, snapshot, MAX_CLUSTER_AGENTS, resolveClusterSize } from "../src/cluster.js";
 import { newestArtifact, personaFor } from "../src/subagent-runner.js";
 import { safeClusterId } from "../src/ids.js";
 
@@ -142,7 +142,7 @@ await ta("an agent that writes its own log line is recorded", async () => {
     root, clusterId: "c", concurrency: 2, direction: "x",
     config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: true },
     runner: agentLikeRunner({ angles: ["alpha", "beta"] }),
-    signal: ac.signal, promptDir: PROMPTS, maxIterations: 2, staggerMs: 0, maxInflight: 2,
+    signal: ac.signal, promptDir: PROMPTS, maxIterations: 2,
   });
   const snap = snapshot(root, "c", 2);
   assert.equal(snap.reported, 2, "both agents must have appended a log line");
@@ -160,7 +160,7 @@ await ta("an agent that claims work but writes nothing is NOT recorded as progre
     root, clusterId: "liar", concurrency: 1, direction: "x",
     config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: false },
     runner: async () => { /* does nothing at all, like an agent with no tools */ },
-    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1, staggerMs: 0,
+    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1,
     onEvent: (e) => events.push(e),
   });
   const p = clusterPaths(root, "liar", 1);
@@ -177,7 +177,7 @@ await ta("a runner that throws is surfaced, not swallowed", async () => {
     root, clusterId: "boom", concurrency: 1, direction: "x",
     config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: false },
     runner: async () => { throw new Error("provider unavailable"); },
-    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1, staggerMs: 0,
+    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1,
     onEvent: (e) => events.push(e),
   });
   const err = events.find((e) => e.type === "error");
@@ -195,8 +195,7 @@ await ta("cluster converges and parks itself without an abort", async () => {
       root, clusterId: "conv", concurrency: 4, direction: "x",
       config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: true },
       runner: agentLikeRunner({ angles, contributions: 1 }),
-      signal: ac.signal, promptDir: PROMPTS, staggerMs: 0, maxInflight: 2,
-    }).then(() => "finished"),
+      signal: ac.signal, promptDir: PROMPTS, }).then(() => "finished"),
     new Promise((r) => setTimeout(() => r("hung"), 8000)),
   ]);
   assert.equal(done, "finished", "cluster must terminate on its own");
@@ -213,7 +212,7 @@ await ta("--max-iterations caps a runner that never stops", async () => {
     root, clusterId: "cap", concurrency: 3, direction: "x",
     config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: false },
     runner: async () => { calls++; },
-    signal: ac.signal, promptDir: PROMPTS, maxIterations: 2, staggerMs: 0, maxInflight: 3,
+    signal: ac.signal, promptDir: PROMPTS, maxIterations: 2,
   });
   assert.ok(calls <= 6, `expected <= 6 dispatches, got ${calls}`);
 });
@@ -227,23 +226,52 @@ await ta("carry-over control: previous artifacts are archived", async () => {
     root, clusterId: "co", concurrency: 1, direction: "x",
     config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: true },
     runner: agentLikeRunner({ angles: [] }),
-    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1, staggerMs: 0,
+    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1,
   });
   assert.ok(!fs.readdirSync(p.env).includes("stale.md"), "stale artifact must not survive");
   assert.ok(fs.readdirSync(path.join(p.base, "history")).some((f) => f.endsWith("stale.md")));
 });
 
-console.log("\nconcurrency limiting");
-await ta("in-flight dispatches are bounded", async () => {
+console.log("\ncluster size cap (the only concurrency control)");
+t("MAX_CLUSTER_AGENTS is 10", () => {
+  assert.equal(MAX_CLUSTER_AGENTS, 10);
+});
+t("resolveClusterSize accepts values up to the cap", () => {
+  assert.equal(resolveClusterSize(1), 1);
+  assert.equal(resolveClusterSize(10), 10);
+  assert.equal(resolveClusterSize("4"), 4, "strings from tool args are fine");
+  assert.equal(resolveClusterSize(3.9), 3, "floors fractional input");
+});
+t("resolveClusterSize refuses to exceed the cap (no silent clamping)", () => {
+  assert.throws(() => resolveClusterSize(11), /exceeds the maximum/);
+  assert.throws(() => resolveClusterSize(999), /exceeds the maximum/);
+});
+t("resolveClusterSize rejects nonsense", () => {
+  for (const bad of [0, -1, NaN, Infinity, "many", null]) {
+    assert.throws(() => resolveClusterSize(bad), /positive number|exceeds/);
+  }
+});
+await ta("all agents start concurrently — no queue, no stagger", async () => {
+  // Serializing agents costs diversity, not just wall clock: a later agent
+  // reads a log its peers already filled and drifts toward agreement. Every
+  // agent must therefore be dispatched immediately.
+  const root = tmp();
+  const ac = new AbortController();
   let inflight = 0, peak = 0;
-  const limited = withConcurrencyLimit(async () => {
-    inflight++; peak = Math.max(peak, inflight);
-    await new Promise((r) => setTimeout(r, 15));
-    inflight--;
-  }, 2);
-  await Promise.all(Array.from({ length: 12 }, () => limited({})));
-  assert.ok(peak <= 2, `peak was ${peak}`);
-  assert.equal(peak, 2, "should use the full allowance");
+  await startCluster({
+    root, clusterId: "par", concurrency: 4, direction: "x",
+    config: { algorithm: "mesh", neighbourRadius: 1, swarmK: 2, autopause: true },
+    runner: async ({ agentIndex, iteration, paths }) => {
+      inflight++; peak = Math.max(peak, inflight);
+      await new Promise((r) => setTimeout(r, 40));
+      inflight--;
+      fs.appendFileSync(paths.logOf(agentIndex), JSON.stringify({
+        iteration, action: "idle", result: "done", next_intent: "",
+      }) + "\n");
+    },
+    signal: ac.signal, promptDir: PROMPTS, maxIterations: 1,
+  });
+  assert.equal(peak, 4, `all 4 agents should have run at once, peak was ${peak}`);
 });
 
 console.log("\nprompt construction");

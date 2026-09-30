@@ -25,6 +25,6 @@
         # amorphous = ring (diversity), swarm = most-recently-active (follow the
         # energy), mesh = everyone (fast alignment, collapses diversity).
         defaultAlgorithm: amorphous
-        # A real agent turn is far heavier than an HTTP call; keep this small.
-        maxInflight: 2
-        staggerMs: 500
+        # Hard ceiling on cluster size. Every agent is a full DSH session, so
+        # this is a refusal, not a queue: asking for more is an error.
+        maxAgents: 10
