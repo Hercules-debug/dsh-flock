@@ -1,0 +1,6 @@
+url: https://github.com/Hercules-debug/dsh-flock
+name: Hercules-debug/dsh-flock
+category: workflow
+description:
+  en: 'Self-organizing multi-agent clusters with no orchestrator. Real DSH subagents coordinate through a shared append-only log, either as a ring/mesh/swarm cluster where each agent gets a frozen snapshot of its neighbours, or as a blackboard where nothing is pushed and each agent decides for itself when to read and write.'
+  zh: '无编排者的自组织多智能体集群。真实 DSH 子智能体通过共享的只追加日志协调：环形/网状/群集模式下每个智能体拿到邻居的冻结快照，黑板模式下不推送任何内容、由智能体自行决定读写时机。'
