@@ -7,6 +7,23 @@ You write one direction file. Nobody assigns tasks, no roles are declared, no
 dependency graph is built. The agents decide for themselves what to do, build on
 and criticise each other's artifacts, and converge by all going idle.
 
+## Two coordination modes
+
+The plugin ships two, and they differ in exactly one thing: **who decides what an
+agent knows about its peers.**
+
+| | `flock_run` — snapshot cluster | `board_run` — blackboard |
+|---|---|---|
+| What the prompt contains | the harness reads each neighbour's last log line and **bakes it in** | **nothing** — just a path and a shell idiom |
+| When an agent reads peers | once, at wake-up; the view never refreshes | whenever it likes, as often as it likes |
+| Topology | ring / mesh / swarm, chosen by you | none — it is one log, and `grep` is the filter |
+| Who decides to stop | the harness, on an `idle` handshake | the agent, and it is dispatched only once |
+| Good for | many quasi-independent contributions, diversity as an asset | work where communication timing should follow the work, not a schedule |
+
+Neither is a superset of the other. The snapshot mode gives a bounded, predictable
+view and a convergence rule; the blackboard gives autonomy and no round structure
+at all.
+
 This is a port of [`aws-samples/sample-kiro-flock`](https://github.com/aws-samples/sample-kiro-flock).
 The AWS original runs headless Kiro CLI sessions on EC2 against an S3 bucket;
 here the agents are **DSH subagents** and the coordination plane is a directory.
@@ -53,9 +70,12 @@ directly.
 
 | Tool | Purpose |
 |---|---|
-| `flock_run` | Start a cluster from one direction. Blocks until it converges or hits its deadline. |
+| `flock_run` | Start a snapshot cluster from one direction. Blocks until it converges or hits its deadline. |
 | `flock_status` | Inspect a cluster: state, each agent's last log line, artifacts on disk. |
 | `flock_direct` | Steer a live cluster: switch algorithm, rewrite the direction, pause/stop. |
+| `board_run` | Start a blackboard cluster. Agents get a log path and decide for themselves when to read and write. |
+| `board_status` | Read a board: entry count, topics, authors, recent entries, files. |
+| `board_direct` | Replace a board's direction, or pause/stop it. |
 
 ```
 flock_run(
@@ -116,6 +136,40 @@ coordinate the way the AWS original does — through the shared log on disk, whi
 is topology-independent. This is the same reason the AWS version uses a bucket
 rather than a message bus, and it is what makes the ring and swarm topologies
 expressible at all.
+
+## Blackboard mode: how concurrent writes are made safe
+
+Multiple agents append to one file with no locks, no CAS, and no transaction.
+That works because the conflicts are designed out rather than arbitrated:
+
+1. **Append only.** An entry is never edited or deleted, so two writers can never
+   overwrite each other. History is the state.
+2. **One write per line.** `O_APPEND` makes a single `write` atomic on a local
+   filesystem. Splitting one line across two writes lets it interleave with a
+   concurrent writer's.
+3. **Tolerate torn reads.** A reader may catch a line mid-write. A line that does
+   not parse is skipped, never fatal — the next read sees it whole.
+
+Rule 2 is load-bearing, and the test suite measures it rather than asserting it:
+
+| Load | Result |
+|---|---|
+| 8 writers × 200 lines, one write per line | **1600 entries, 0 corrupt** |
+| 6 writers × 50 lines, each split across two writes | **187 of 300 corrupt** |
+
+The failing case is kept as a test so the rule cannot quietly rot.
+
+**This holds on a local filesystem.** `O_APPEND` is not reliably atomic on
+NFS/SMB, and object stores like S3 have no append at all — which is exactly why
+the AWS original writes one object per agent instead.
+
+Because the harness pushes nothing into a board agent's prompt, the write
+protocol has to reach the agent as instructions. `prompts/board/board-loop.md`
+gives it a copy-pasteable template that routes the body through `json.dumps`, so
+quotes, newlines and backslashes cannot break the line, plus the rule that
+matters: **read the entry back and confirm it is yours**, because `>>` creates
+the redirect target *before* running the command, so a failed write looks
+successful.
 
 ## Repository layout
 

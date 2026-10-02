@@ -1,9 +1,8 @@
 {
-  "name": "@local/dsh-flock",
+  "name": "dsh-flock",
   "version": "0.1.0",
-  "private": false,
+  "description": "Self-organizing multi-agent clusters for DeepSeek Harness: N agents coordinate through a shared append-only log with no orchestrator — as a frozen-snapshot ring/mesh/swarm cluster, or as a blackboard each agent reads and writes on its own schedule. Port of aws-samples/sample-kiro-flock.",
   "type": "module",
-  "description": "Self-organizing multi-agent clusters for DeepSeek Harness — N real agents coordinating through a shared append-only log with no orchestrator. Port of aws-samples/sample-kiro-flock.",
   "main": "lib/index.js",
   "exports": {
     ".": {
@@ -27,8 +26,7 @@
     "plugin": "node test/plugin-load.js",
     "subagent": "node test/subagent-dispatch.js",
     "board": "node test/board.js",
-    "test": "node test/board.js && node test/smoke.js && node test/diff/topology-diff.js && node test/plugin-load.js && node test/subagent-dispatch.js",
-    "live": "node test/live-cluster.mjs"
+    "test": "node test/board.js && node test/smoke.js && node test/diff/topology-diff.js && node test/plugin-load.js && node test/subagent-dispatch.js"
   },
   "dsh": {
     "bundle": {
@@ -37,19 +35,31 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.2 || 0.1.5-rc.1",
     "@deepseek-ai/schemastery": "*"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^22.19.0 || >=24"
   },
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hercules-debug/dsh-flock.git"
+  },
+  "homepage": "https://github.com/Hercules-debug/dsh-flock#readme",
+  "bugs": {
+    "url": "https://github.com/Hercules-debug/dsh-flock/issues"
+  },
   "keywords": [
     "dsh",
+    "dsh-plugin",
     "deepseek-harness",
     "multi-agent",
     "self-organizing",
+    "blackboard",
     "stigmergy",
-    "orchestrator-free"
+    "orchestrator-free",
+    "agent-swarm",
+    "subagent"
   ]
 }
