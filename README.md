@@ -7,31 +7,61 @@ You write one direction file. Nobody assigns tasks, no roles are declared, no
 dependency graph is built. The agents decide for themselves what to do, build on
 and criticise each other's artifacts, and converge by all going idle.
 
-## Two coordination modes
+## Two coordination modes — use the blackboard
 
-The plugin ships two, and they differ in exactly one thing: **who decides what an
-agent knows about its peers.**
+The plugin ships two. **Start with `board_run`**; reach for `flock_run` only when
+you specifically want a fixed peer set and an automatic convergence rule.
 
-| | `flock_run` — snapshot cluster | `board_run` — blackboard |
+They differ in exactly one thing: **who decides what an agent knows about its
+peers.**
+
+| | `board_run` — blackboard *(recommended)* | `flock_run` — snapshot cluster |
 |---|---|---|
-| What the prompt contains | the harness reads each neighbour's last log line and **bakes it in** | **nothing** — just a path and a shell idiom |
-| When an agent reads peers | once, at wake-up; the view never refreshes | whenever it likes, as often as it likes |
-| Topology | ring / mesh / swarm, chosen by you | none — it is one log, and `grep` is the filter |
-| Who decides to stop | the harness, on an `idle` handshake | the agent, and it is dispatched only once |
-| Good for | many quasi-independent contributions, diversity as an asset | work where communication timing should follow the work, not a schedule |
+| What the prompt contains | **nothing** — just a path and a shell idiom | the harness reads each neighbour's last log line and **bakes it in** |
+| When an agent reads peers | whenever it likes, as often as it likes | once, at wake-up; the view never refreshes |
+| Topology | none — it is one log, and `grep` is the filter | ring / mesh / swarm, chosen by you |
+| Who decides to stop | the agent, and it is dispatched only once | the harness, on an `idle` handshake |
+| Rounds | none | repeated until every visible agent reports idle |
 
-Neither is a superset of the other. The snapshot mode gives a bounded, predictable
-view and a convergence rule; the blackboard gives autonomy and no round structure
-at all.
+**Why the blackboard is the better default.** An agent is a function call, so
+"read what my peers did" should be a call it can make whenever it wants — not a
+snapshot someone hands it once and then freezes. In practice the snapshot mode's
+convergence rule is also its weak point: it depends on agents volunteering that
+they are idle, and in every run we measured they never did, so the cluster had to
+be stopped by hand. The blackboard has no such rule to satisfy.
+
+**Use the snapshot mode when** you want a bounded, predictable peer set (an
+amorphous ring gives each agent a fixed slice of the cluster, so per-agent
+context stays constant as N grows) and you are happy for the harness to decide
+when the work is done. It is also the closer port of the AWS original, which is
+what makes the differential test against upstream meaningful.
+
+### Try it
+
+```
+board_run(
+  direction: "Survey the failure modes of log-based agent coordination.",
+  agents: 4
+)
+```
+
+Then `board_status(board: "...")` to read what they wrote.
 
 This is a port of [`aws-samples/sample-kiro-flock`](https://github.com/aws-samples/sample-kiro-flock).
 The AWS original runs headless Kiro CLI sessions on EC2 against an S3 bucket;
 here the agents are **DSH subagents** and the coordination plane is a directory.
+The blackboard mode is the deviation: AWS coordinates by having every agent read
+its neighbours' logs on a timer, which works because their agents are cheap
+short-lived CLI calls. A DSH agent is minutes long, so the same design produced
+snapshots that were stale by the time an agent acted, and a convergence rule that
+never fired. Giving the agent its own read/write tools instead is what this port
+adds.
 
 ```
 EC2 instances + S3 bucket   ->  DSH subagents + a directory
 headless Kiro CLI session   ->  ctx.subagents.startContinuable()
-systemd reap                ->  self-terminating convergence
+timer-driven neighbour read ->  agent-driven blackboard read/write
+systemd reap                ->  one dispatch per agent
 ```
 
 ## Why subagents, not a model call
@@ -59,38 +89,47 @@ dsh plugin --profile <name> add /path/to/dsh-flock
 ```
 
 The bundle patch (`cordis.patch.yml`) mounts the plugin into the profile's host
-composition. It registers three tools into the shared tool registry and one
-usage section into the global system prompt.
+composition. It registers six tools into the shared tool registry and one usage
+section into the global system prompt.
 
 ## Use
 
-Any session in that profile can start a cluster in natural language
-("start a flock of 6 agents to review this codebase"), or call the tools
-directly.
+Any session in that profile can start a cluster in natural language ("start a
+board of 4 agents to review this codebase"), or call the tools directly.
 
 | Tool | Purpose |
 |---|---|
+| **`board_run`** | **Start a blackboard cluster.** Agents get a log path and decide for themselves when to read and write. |
+| **`board_status`** | Read a board: entry count, topics, authors, recent entries, files. |
+| **`board_direct`** | Replace a board's direction, or pause/stop it. |
 | `flock_run` | Start a snapshot cluster from one direction. Blocks until it converges or hits its deadline. |
 | `flock_status` | Inspect a cluster: state, each agent's last log line, artifacts on disk. |
 | `flock_direct` | Steer a live cluster: switch algorithm, rewrite the direction, pause/stop. |
-| `board_run` | Start a blackboard cluster. Agents get a log path and decide for themselves when to read and write. |
-| `board_status` | Read a board: entry count, topics, authors, recent entries, files. |
-| `board_direct` | Replace a board's direction, or pause/stop it. |
 
 ```
-flock_run(
+board_run(
   direction: "Survey the failure modes of log-based agent coordination.",
-  agents: 4,
-  algorithm: "amorphous"
+  agents: 4
 )
 ```
 
+`direction` states **what to achieve**, not how to decompose it — the split is
+the agents' decision, and prescribing it defeats the point.
+
 **When to use it.** Work that splits into many quasi-independent contributions,
-where diversity of approach is an asset and agents can join or leave freely.
+where the agents are better placed than you are to decide what needs doing and
+when to talk about it.
 
 **When not to.** A known task tree with strict ordering, or work that needs a
-verification gate between steps — a normal delegation is better there. The tool
-description says so explicitly, so the model does not over-apply the pattern.
+verification gate between steps — a normal delegation is better there. Both tool
+descriptions say so explicitly, so the model does not over-apply the pattern.
+
+**One caveat worth knowing up front.** Board agents get no wake-up channel: one
+dispatch, then they are done. Inside that dispatch they read and write the board
+as often as they like, but when it ends, it ends. `prompts/board/board-loop.md`
+tells them so plainly and asks them to leave anything unfinished on the board
+rather than assuming a next turn. It works, but a long task is better split
+across two boards than hoped into one dispatch.
 
 ## The three algorithms
 

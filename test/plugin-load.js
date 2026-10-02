@@ -130,13 +130,30 @@ await ta("registers a system-prompt usage section", async () => {
   assert.match(ctx._sections[0].text, /no orchestrator|no assigned roles/i);
 });
 
-await ta("flock_run's description tells the model when NOT to use it", async () => {
+await ta("flock_run's description says when NOT to use it and points at board_run", async () => {
   const ctx = mockCtx();
   mod.apply(ctx, new mod.Config({}));
   const d = ctx._tools.get("flock_run").description;
-  assert.match(d, /no orchestrator/i);
-  assert.match(d, /Do NOT use it/i, "a pattern tool must document its bad-fit cases");
+  assert.match(d, /Do NOT use/i, "a pattern tool must document its bad-fit cases");
   assert.match(d, /depend on each other in a fixed order/i);
+  assert.match(d, /PREFER board_run/i, "the recommended mode must be named where the choice is made");
+});
+
+await ta("board_run is presented as the recommended default", async () => {
+  const ctx = mockCtx();
+  mod.apply(ctx, new mod.Config({}));
+  const d = ctx._tools.get("board_run").description;
+  assert.match(d, /RECOMMENDED/i);
+  // It must also say why the alternative is worse, not merely that it exists.
+  assert.match(d, /idle handshake|snapshot/i);
+});
+
+await ta("the system prompt recommends board_run over flock_run", async () => {
+  const ctx = mockCtx();
+  mod.apply(ctx, new mod.Config({}));
+  const text = ctx._sections.map((s) => s.text).join("\n");
+  assert.match(text, /Prefer board_run/i);
+  assert.match(text, /flock_run only when/i, "the exception must be stated, not just the preference");
 });
 
 await ta("tool parameters compile to JSON Schema with the right required fields", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-flock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-organizing multi-agent clusters for DeepSeek Harness: N agents coordinate through a shared append-only log with no orchestrator — as a frozen-snapshot ring/mesh/swarm cluster, or as a blackboard each agent reads and writes on its own schedule. Port of aws-samples/sample-kiro-flock.",
   "type": "module",
   "main": "lib/index.js",
